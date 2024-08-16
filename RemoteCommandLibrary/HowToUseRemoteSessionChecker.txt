@@ -1,0 +1,241 @@
+﻿To implement this in a WPF application, I'll guide you through the necessary steps, including setting up the WPF project, creating the UI, and writing the code-behind logic to handle the parallel execution, progress updates, and data binding.
+
+### Step 1: Create a WPF Project
+
+1. Open Visual Studio.
+2. Create a new WPF App (.NET Framework) project.
+3. Name the project (e.g., `RemoteSessionCheckerApp`).
+
+### Step 2: Design the UI in XAML
+
+In `MainWindow.xaml`, define the UI elements: a `ProgressBar`, `TextBlock` for progress, and a `DataGrid` for displaying the results.
+
+```xml
+<Window x:Class="RemoteSessionCheckerApp.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Remote Session Checker" Height="450" Width="800">
+    <Grid Margin="10">
+        <StackPanel>
+            <ProgressBar x:Name="SearchProgressBar" Height="25" Minimum="0" Maximum="100" />
+            <TextBlock x:Name="ProgressTextBlock" Margin="0,10,0,0" FontSize="14"/>
+            <DataGrid x:Name="UsersDataGrid" AutoGenerateColumns="True" Height="300" Margin="0,10,0,0"/>
+            <Button Content="Start Check" Click="StartCheck_Click" Width="100" Height="30" HorizontalAlignment="Left"/>
+        </StackPanel>
+    </Grid>
+</Window>
+```
+
+### Step 3: Implement the Logic in Code-Behind
+
+In `MainWindow.xaml.cs`, implement the necessary logic for running the session checker in parallel, updating the UI, and binding the data to the `DataGrid`.
+
+1. **Add Necessary Usings**:
+
+```csharp
+using System.Collections.Generic;
+using System.Collections.ObjectModel;
+using System.Threading.Tasks;
+using System.Windows;
+```
+
+2. **Declare and Initialize the ObservableCollection**:
+
+Add the following fields to your `MainWindow` class:
+
+```csharp
+public partial class MainWindow : Window
+{
+    private ObservableCollection<SessionInfo> _sessionCollection;
+    private RemoteSessionChecker _sessionChecker;
+
+    public MainWindow()
+    {
+        InitializeComponent();
+
+        _sessionCollection = new ObservableCollection<SessionInfo>();
+        UsersDataGrid.ItemsSource = _sessionCollection;
+
+        // Initialize the RemoteSessionChecker with a degree of parallelism
+        _sessionChecker = new RemoteSessionChecker(maxDegreeOfParallelism: 10);
+    }
+
+    private async void StartCheck_Click(object sender, RoutedEventArgs e)
+    {
+        await StartSessionCheckAsync();
+    }
+
+    private async Task StartSessionCheckAsync()
+    {
+        // Replace with your actual list of computer names
+        var computerNames = new List<string> { "Computer1", "Computer2", "Computer3" };
+
+        // Clear the previous results
+        _sessionCollection.Clear();
+
+        // Start the session checking process
+        await _sessionChecker.RunQuserOnMultipleComputersAsync(
+            computerNames,
+            username: "desiredUsername",
+            progressBar: SearchProgressBar,
+            progressTextBlock: ProgressTextBlock,
+            dataGrid: UsersDataGrid,
+            sessionCollection: _sessionCollection);
+    }
+}
+```
+
+3. **Define the `SessionInfo` and `RemoteSessionChecker` Classes**:
+
+You can place these classes in a separate file within your project, but for simplicity, I'll include them here.
+
+```csharp
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
+using System.Windows;
+using System.Windows.Controls;
+
+namespace RemoteSessionCheckerApp
+{
+    public class SessionInfo
+    {
+        public string ComputerName { get; set; }
+        public string SessionName { get; set; }
+        public string UserName { get; set; }
+        public string SessionId { get; set; }
+        public string State { get; set; }
+        public string IdleTime { get; set; }
+        public string LogonTime { get; set; }
+
+        public override string ToString()
+        {
+            return $"ComputerName: {ComputerName}, SessionName: {SessionName}, UserName: {UserName}, SessionId: {SessionId}, State: {State}, IdleTime: {IdleTime}, LogonTime: {LogonTime}";
+        }
+    }
+
+    public class RemoteSessionChecker
+    {
+        private readonly SemaphoreSlim _semaphore;
+        private readonly int _maxDegreeOfParallelism;
+
+        public RemoteSessionChecker(int maxDegreeOfParallelism = 10)
+        {
+            _maxDegreeOfParallelism = maxDegreeOfParallelism;
+            _semaphore = new SemaphoreSlim(_maxDegreeOfParallelism);
+        }
+
+        public async Task RunQuserOnMultipleComputersAsync(
+            List<string> computerNames,
+            string username,
+            ProgressBar progressBar,
+            TextBlock progressTextBlock,
+            DataGrid dataGrid,
+            ObservableCollection<SessionInfo> sessionCollection)
+        {
+            int totalComputers = computerNames.Count;
+            int completedComputers = 0;
+
+            var tasks = new List<Task>();
+
+            foreach (var computerName in computerNames)
+            {
+                await _semaphore.WaitAsync();
+
+                tasks.Add(Task.Run(async () =>
+                {
+                    try
+                    {
+                        string quserOutput = await RunQuserAsync(computerName);
+
+                        List<SessionInfo> sessions = ParseQuserOutput(quserOutput, computerName, username);
+
+                        // Update UI (Progress and DataGrid) on the main thread
+                        Application.Current.Dispatcher.Invoke(() =>
+                        {
+                            foreach (var session in sessions)
+                            {
+                                sessionCollection.Add(session);
+                            }
+
+                            completedComputers++;
+                            progressTextBlock.Text = $"Processed: {completedComputers}/{totalComputers} computers";
+                            progressBar.Value = (double)completedComputers / totalComputers * 100;
+                        });
+                    }
+                    finally
+                    {
+                        _semaphore.Release();
+                    }
+                }));
+            }
+
+            await Task.WhenAll(tasks);
+        }
+
+        private async Task<string> RunQuserAsync(string computerName)
+        {
+            // Simulate running quser.exe and returning output
+            await Task.Delay(500); // Simulate a delay for the remote command
+            return $"USERNAME\tSESSIONNAME\tID\tSTATE\tIDLE TIME\tLOGON TIME\nUser1\tRDP-Tcp#1\t1\tActive\t0:00\t1/1/2022 12:00 PM";
+        }
+
+        public List<SessionInfo> ParseQuserOutput(string quserOutput, string computerName, string username = null)
+        {
+            var sessions = new List<SessionInfo>();
+            var lines = quserOutput.Split(new[] { Environment.NewLine }, StringSplitOptions.RemoveEmptyEntries);
+
+            // Skip the header line
+            foreach (var line in lines.Skip(1))
+            {
+                var columns = line.Split(new[] { '\t' }, StringSplitOptions.RemoveEmptyEntries);
+
+                if (columns.Length < 5)
+                {
+                    // Log or handle the case where a line does not have enough columns
+                    Console.WriteLine($"Skipping line due to insufficient columns: {line}");
+                    continue;
+                }
+
+                var sessionInfo = new SessionInfo
+                {
+                    ComputerName = computerName,
+                    SessionName = columns.Length > 0 ? columns[0] : string.Empty,
+                    UserName = columns.Length > 1 ? columns[1] : string.Empty,
+                    SessionId = columns.Length > 2 ? columns[2] : string.Empty,
+                    State = columns.Length > 3 ? columns[3] : string.Empty,
+                    IdleTime = columns.Length > 4 ? columns[4] : string.Empty,
+                    LogonTime = columns.Length > 5 ? string.Join(" ", columns.Skip(5)) : string.Empty
+                };
+
+                if (string.IsNullOrEmpty(username) || sessionInfo.UserName.Equals(username, StringComparison.OrdinalIgnoreCase))
+                {
+                    sessions.Add(sessionInfo);
+                }
+            }
+
+            return sessions;
+        }
+    }
+}
+```
+
+### Step 4: Run the Application
+
+When you run the application:
+
+1. **Click the "Start Check" Button**: This initiates the process of checking sessions across multiple computers.
+2. **Progress Bar and TextBlock**: As the application processes each computer, the progress bar and text block will update to show the current progress.
+3. **DataGrid**: The `DataGrid` will display the sessions found for the specified username across the computers.
+
+### Summary:
+
+- **Throttling**: Controlled by `SemaphoreSlim` to prevent overwhelming the system with too many concurrent tasks.
+- **UI Updates**: Performed on the main thread using `Dispatcher.Invoke` to ensure thread safety.
+- **Data Binding**: Uses `ObservableCollection` for seamless integration with WPF's `DataGrid`.
+- **Progress Reporting**: Provides real-time feedback on the processing status to the user.
+
+This implementation should give you a scalable and responsive way to handle session checks across multiple computers within a WPF application.
